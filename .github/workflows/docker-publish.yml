@@ -1,0 +1,49 @@
+name: Build and Push vLLM Images
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version: ["0.18.1", "0.19.0"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 設定 Docker Buildx
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.vllm_version }}
+          build-args: |
+            VLLM_VERSION=${{ matrix.vllm_version }}
+
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
