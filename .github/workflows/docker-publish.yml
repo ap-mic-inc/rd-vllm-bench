@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        vllm_version: ["0.18.1", "0.19.0"]
+        vllm_version: ["0.18.1", "0.19.0", "0.19.1"]
 
     steps:
       - name: Checkout repository
