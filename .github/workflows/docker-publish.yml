@@ -4,13 +4,88 @@ on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
+    inputs:
+      vllm_version:
+        description: 'Specific vLLM version to build (leave empty for auto-detect)'
+        required: false
+        type: string
+      force_rebuild:
+        description: 'Force rebuild all versions (ignore existing images)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  detect-versions:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Determine versions to build
+        id: set-matrix
+        run: |
+          ALL_VERSIONS=("0.18.1" "0.19.0" "0.19.1")
+
+          # --- Manual trigger with specific version ---
+          if [ -n "${{ inputs.vllm_version }}" ]; then
+            echo "matrix={\"vllm_version\":[\"${{ inputs.vllm_version }}\"]}" >> $GITHUB_OUTPUT
+            echo "✅ Manual trigger: building version ${{ inputs.vllm_version }}"
+            exit 0
+          fi
+
+          # --- Check if Dockerfile changed or force rebuild ---
+          REBUILD_ALL=false
+          if [ "${{ inputs.force_rebuild }}" == "true" ]; then
+            REBUILD_ALL=true
+            echo "🔄 Force rebuild requested"
+          elif git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q "^Dockerfile$"; then
+            REBUILD_ALL=true
+            echo "📦 Dockerfile changed → rebuilding all versions"
+          fi
+
+          if [ "$REBUILD_ALL" == "true" ]; then
+            JOINED=$(printf ',"%s"' "${ALL_VERSIONS[@]}")
+            JOINED="[${JOINED:1}]"
+            echo "matrix={\"vllm_version\":${JOINED}}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # --- Only build missing versions ---
+          MISSING=()
+          for v in "${ALL_VERSIONS[@]}"; do
+            TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:${GITHUB_REPOSITORY}:pull" | jq -r .token)
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer ${TOKEN}" \
+              "https://ghcr.io/v2/${GITHUB_REPOSITORY}/manifests/${v}")
+
+            if [ "$STATUS" == "200" ]; then
+              echo "✅ Version ${v}: EXISTS → skipping"
+            else
+              MISSING+=("\"${v}\"")
+              echo "🆕 Version ${v}: NOT FOUND → will build"
+            fi
+          done
+
+          if [ ${#MISSING[@]} -eq 0 ]; then
+            echo "🎉 All images already exist, nothing to build"
+            echo "matrix={\"vllm_version\":[]}" >> $GITHUB_OUTPUT
+          else
+            JOINED=$(IFS=,; echo "${MISSING[*]}")
+            echo "matrix={\"vllm_version\":[${JOINED}]}" >> $GITHUB_OUTPUT
+          fi
+
   build-and-push:
+    needs: detect-versions
+    if: ${{ fromJson(needs.detect-versions.outputs.matrix).vllm_version[0] != null }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -18,8 +93,7 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        vllm_version: ["0.18.1", "0.19.0", "0.19.1"]
+      matrix: ${{ fromJson(needs.detect-versions.outputs.matrix) }}
 
     steps:
       - name: Checkout repository
@@ -44,6 +118,5 @@ jobs:
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.vllm_version }}
           build-args: |
             VLLM_VERSION=${{ matrix.vllm_version }}
-
           cache-from: type=gha
           cache-to: type=gha,mode=max
